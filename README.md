@@ -1,11 +1,10 @@
 # 🎨 Color Sorter Conveyor Project
 
-**Hardware:** Volodymyr Bevz (Head of Laboratory, UCU)
-
-**Code base:** Oleh Hombosh 
-**Created:** August 2025  
-**University:** Ukrainian Catholic University (UCU)  
-**Program:** 2nd-year Robotics
+- **Hardware:** Volodymyr Bevz (Head of Laboratory, UCU)
+- **Code base:** Oleh Hombosh
+- **Created:** August 2025  
+- **University:** Ukrainian Catholic University (UCU)  
+- **Program:** 2nd-year Robotics
 
 ---
 
@@ -23,7 +22,7 @@ The goal is to simulate a **miniature factory sorting line** using sensors and a
 
 ## 📸 Project Photo
 
-![Project Setup](https://ibb.co/ZRjHGdP3)
+![Project Setup](https://i.ibb.co/zWM8QsY1/photo-2025-10-04-15-45-52.jpg)
 
 ---
 

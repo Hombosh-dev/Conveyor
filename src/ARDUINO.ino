@@ -1,150 +1,171 @@
 #include <Arduino.h>
 #include <AccelStepper.h>
 
-AccelStepper stepper; // Defaults to AccelStepper::FULL4WIRE (4 pins) on 2, 3, 4, 5
-
-// --- Вхідні сигнали ---
+// -------------------- Піни --------------------
+// Сигнали для DC моторів
 #define SIG1 6
 #define SIG2 7
 
-// --- Мотор 1 (Green) ---
-#define D1_IN1 9
-#define D1_IN2 10
-#define D1_EN 8
+// DC Мотор 1
+#define D1_IN1 8
+#define D1_IN2 9
+#define D1_EN  10
 
-// --- Мотор 2 (Red) ---
-#define D2_IN1 12
-#define D2_IN2 13
-#define D2_EN 11
+// DC Мотор 2
+#define D2_IN1 13
+#define D2_IN2 12
+#define D2_EN  11
 
-// --- Таймінги ---
-const unsigned long pullInterval = 15000;  // період авто підтягування
-const unsigned long pushDuration = 100;    // імпульс пушу 100 мс
-const unsigned long debounceInterval = 300; // захист від повторного спрацювання
+// Stepper (FULL4WIRE на 2,3,4,5)
+AccelStepper stepper(AccelStepper::FULL4WIRE, 3,2, 5,4);
 
-unsigned long lastPullTime = 0;
-unsigned long lastSig1Time = 0;
-unsigned long lastSig2Time = 0;
-unsigned long kicker1Start = 0;
-unsigned long kicker2Start = 0;
+// -------------------- Таймінги --------------------
+const uint16_t PULL_PERIOD  = 20000; // підтягування раз у 20 c
+const uint8_t M1_FORWARD_TIME   = 200;   // мс рух вперед (скидання)
+const uint8_t M2_FORWARD_TIME   = 200;   // мс рух вперед (скидання)
+const uint8_t M1_BACKWARD_TIME  = 200;   // мс рух назад (піднімання)
+const uint8_t M2_BACKWARD_TIME  = 200;   // мс рух назад (піднімання)
 
-bool kicker1Active = false;
-bool kicker2Active = false;
+// PWM для різних режимів
+const uint8_t M1_KICK_PWM = 90;   // Скидання M1
+const uint8_t M2_KICK_PWM = 90;   // Скидання M2
+const uint8_t M1_PULL_PWM = 70;   // Підтягування M1
+const uint8_t M2_PULL_PWM = 50;   // Підтягування M2
 
-// --- Прототипи ---
-void kicker1Push();
-void kicker1Release();
-void kicker2Push();
-void kicker2Release();
-void kicker1Backward();
-void kicker2Backward();
+// -------------------- Стани DC моторів --------------------
+enum State { IDLE, FORWARD, BACKWARD };
 
+struct Motor {
+  byte in1, in2, en;
+  State state;
+  unsigned long tStart;
+  bool active;
+
+  Motor(byte _in1, byte _in2, byte _en)
+    : in1(_in1), in2(_in2), en(_en), state(IDLE), tStart(0), active(false) {}
+};
+
+Motor m1(D1_IN1, D1_IN2, D1_EN);
+Motor m2(D2_IN1, D2_IN2, D2_EN);
+
+// Фіксація фронтів сигналів
+bool sig1Prev = false;
+bool sig2Prev = false;
+
+// Таймер авто-підтягування
+unsigned long lastPull = 0;
+
+// -------------------- Утиліти керування DC --------------------
+// ⚡️ Тут я перевернув полярність (міняємо in1/in2 місцями)
+inline void motorForward(Motor &m, int pwm, const char *name) {
+  digitalWrite(m.in1, LOW);
+  digitalWrite(m.in2, HIGH);
+  analogWrite(m.en, pwm);
+  m.state = FORWARD;
+  m.tStart = millis();
+  m.active = true;
+  Serial.print(name); Serial.println(" FORWARD");
+}
+
+inline void motorBackward(Motor &m, int pwm, const char *name) {
+  digitalWrite(m.in1, HIGH);
+  digitalWrite(m.in2, LOW);
+  analogWrite(m.en, pwm);
+  m.state = BACKWARD;
+  m.tStart = millis();
+  m.active = true;
+  Serial.print(name); Serial.println(" BACKWARD");
+}
+
+inline void motorStop(Motor &m, const char *name) {
+  digitalWrite(m.in1, LOW);
+  digitalWrite(m.in2, LOW);
+  analogWrite(m.en, 0);
+  m.state = IDLE;
+  m.active = false;
+  Serial.print(name); Serial.println(" STOP");
+}
+
+inline void handleMotor(Motor &m, unsigned long fwdMs, unsigned long backMs, int pwm, const char *name) {
+
+  unsigned long now = millis();
+  switch (m.state) {
+    case FORWARD:
+      if (now - m.tStart >= fwdMs) {
+        motorBackward(m, pwm, name);
+      }
+      break;
+    case BACKWARD:
+      if (now - m.tStart >= backMs) {
+        motorStop(m, name);
+      }
+      break;
+    default: break;
+  }
+}
+
+// -------------------- SETUP --------------------
 void setup() {
   Serial.begin(9600);
 
-  // --- Входи ---
   pinMode(SIG1, INPUT);
   pinMode(SIG2, INPUT);
 
-  // --- Мотори ---
-  pinMode(D1_IN1, OUTPUT);
-  pinMode(D1_IN2, OUTPUT);
-  pinMode(D1_EN, OUTPUT);
+  pinMode(m1.in1, OUTPUT);
+  pinMode(m1.in2, OUTPUT);
+  pinMode(m1.en,  OUTPUT);
 
-  pinMode(D2_IN1, OUTPUT);
-  pinMode(D2_IN2, OUTPUT);
-  pinMode(D2_EN, OUTPUT);
+  pinMode(m2.in1, OUTPUT);
+  pinMode(m2.in2, OUTPUT);
+  pinMode(m2.en,  OUTPUT);
 
-  kicker1Release();
-  kicker2Release();
+  motorBackward(m1, M1_PULL_PWM, "M1");
+  motorBackward(m2, M2_PULL_PWM, "M2");
 
-  // --- Налаштування крокового ---
-  stepper.setMaxSpeed(1000);
-  stepper.setSpeed(1000);
+  delay(100);
+
+  motorStop(m1, "M1");
+  motorStop(m2, "M2");
+
+  // Безперервна робота кроковика
+  stepper.setMaxSpeed(1500); 
+  stepper.setSpeed(1000);    
+
+  Serial.println("=== SETUP DONE ===");
 }
 
+// -------------------- LOOP --------------------
 void loop() {
-  unsigned long now = millis();
+  uint64_t now = millis();
+
+  // Кроковий крутиться постійно
   stepper.runSpeed();
 
-  // ---- Сигнали з debounce ----
-  if (digitalRead(SIG1) == HIGH && (now - lastSig1Time >= debounceInterval) && !kicker1Active) {
-    kicker1Push();
-    kicker1Start = now;
-    kicker1Active = true;
-    lastSig1Time = now;
+  // ----- Фронти сигналів -----
+  bool s1 = digitalRead(SIG1);
+  bool s2 = digitalRead(SIG2);
+
+  if (s1 && !sig1Prev && !m1.active) {
+    Serial.println("SIG1 TRIGGER");
+    motorForward(m1, M1_KICK_PWM, "M1");   // Скидання
+  }
+  if (s2 && !sig2Prev && !m2.active) {
+    Serial.println("SIG2 TRIGGER");
+    motorForward(m2, M2_KICK_PWM, "M2");   // Скидання
   }
 
-  if (digitalRead(SIG2) == HIGH && (now - lastSig2Time >= debounceInterval) && !kicker2Active) {
-    kicker2Push();
-    kicker2Start = now;
-    kicker2Active = true;
-    lastSig2Time = now;
+  sig1Prev = s1;
+  sig2Prev = s2;
+
+  // ----- Авто-підтягування раз у 20 с -----
+  if ((now - lastPull) >= PULL_PERIOD && !m1.active && !m2.active) {
+    Serial.println("=== AUTO PULL ===");
+    motorBackward(m1, M1_PULL_PWM, "M1");
+    motorBackward(m2, M2_PULL_PWM, "M2");
+    lastPull = now;
   }
 
-  // ---- Авто підтягування кожні 15 сек ----
-  if (!kicker1Active && !kicker2Active && now - lastPullTime >= pullInterval) {
-    Serial.println("Auto pull");
-    kicker1Backward();
-    kicker2Backward();
-    kicker1Start = now;
-    kicker2Start = now;
-    kicker1Active = true;
-    kicker2Active = true;
-    lastPullTime = now;
-  }
-
-  // ---- Вимкнення моторів після pushDuration мс ----
-  if (kicker1Active && now - kicker1Start >= pushDuration) {
-    kicker1Release();
-    kicker1Active = false;
-  }
-  if (kicker2Active && now - kicker2Start >= pushDuration) {
-    kicker2Release();
-    kicker2Active = false;
-  }
-}
-
-// ---- Керування моторами ----
-void kicker1Push() {
-  Serial.println("Motor 1 ON");
-  digitalWrite(D1_IN1, HIGH);
-  digitalWrite(D1_IN2, LOW);
-  analogWrite(D1_EN, 200);
-}
-
-void kicker1Release() {
-  Serial.println("Motor 1 OFF");
-  digitalWrite(D1_IN1, LOW);
-  digitalWrite(D1_IN2, LOW);
-  analogWrite(D1_EN, 0);
-}
-
-void kicker2Push() {
-  Serial.println("Motor 2 ON");
-  digitalWrite(D2_IN1, HIGH);
-  digitalWrite(D2_IN2, LOW);
-  analogWrite(D2_EN, 200);
-}
-
-void kicker2Release() {
-  Serial.println("Motor 2 OFF");
-  digitalWrite(D2_IN1, LOW);
-  digitalWrite(D2_IN2, LOW);
-  analogWrite(D2_EN, 0);
-}
-
-// ---- Підтягування назад ----
-void kicker1Backward() {
-  Serial.println("Motor 1 BACKWARD");
-  digitalWrite(D1_IN1, LOW);
-  digitalWrite(D1_IN2, HIGH);
-  analogWrite(D1_EN, 200);
-}
-
-void kicker2Backward() {
-  Serial.println("Motor 2 BACKWARD");
-  digitalWrite(D2_IN1, LOW);
-  digitalWrite(D2_IN2, HIGH);
-  analogWrite(D2_EN, 200);
+  // ----- Обробка станів DC моторів -----
+  handleMotor(m1, M1_FORWARD_TIME, M1_BACKWARD_TIME, M1_KICK_PWM, "M1");
+  handleMotor(m2, M2_FORWARD_TIME, M2_BACKWARD_TIME, M2_KICK_PWM, "M2");
 }
